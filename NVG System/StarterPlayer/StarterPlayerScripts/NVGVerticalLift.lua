@@ -3,6 +3,7 @@
 
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 
 -- NVG Vertical Lift System
 local VerticalLift = {}
@@ -24,13 +25,15 @@ function VerticalLift.new(helmet, gui)
     self.maxAngle = DEFAULT_SETTINGS.maxAngle
     self.rotationSpeed = DEFAULT_SETTINGS.rotationSpeed
     self.isAdjusting = false
+    self.enabled = true -- allow adjustment only when NVG is OFF
     
     -- References
     self.helmet = helmet
     self.gui = gui
     self.middlePart = nil
     self.nvgPart = nil
-    self.originalCFrame = nil
+    self.twistJoint = nil
+    self.originalC0 = nil
     self.upValue = nil
     self.downValue = nil
     
@@ -62,6 +65,13 @@ function VerticalLift:Initialize()
         warn("NVG Vertical Lift: Missing required parts (Middle or Up)")
         return false
     end
+
+    -- The 'Up' object is a Model; use its Motor6D 'twistjoint' to rotate
+    self.twistJoint = self.nvgPart:FindFirstChild("twistjoint")
+    if not self.twistJoint or not self.twistJoint:IsA("Motor6D") then
+        warn("NVG Vertical Lift: Missing Motor6D 'twistjoint' inside Up model")
+        return false
+    end
     
     -- Get CFrameValues
     self.upValue = self.nvgPart:FindFirstChild("upvalue")
@@ -89,9 +99,9 @@ function VerticalLift:Initialize()
     self:SetupInputHandling()
     print("Input handling set up")
     
-    -- Reset to neutral position
-    self:ResetToNeutral()
-    print("Reset to neutral position")
+    -- Initialize position and indicator once
+    self:UpdatePosition()
+    self:UpdateIndicator()
     
     print("Vertical Lift System initialization complete")
     return true
@@ -102,21 +112,21 @@ function VerticalLift:CalculateAnglesFromCFrameValues()
     local downCFrame = self.downValue.Value
     
     -- Extract rotation angles from the CFrames (returns X, Y, Z values)
-    local upX, upY, upZ = upCFrame:ToEulerAnglesXYZ()
-    local downX, downY, downZ = downCFrame:ToEulerAnglesXYZ()
+    local upX = upCFrame:ToEulerAnglesXYZ()
+    local downX = downCFrame:ToEulerAnglesXYZ()
     
-    -- Convert to degrees and set limits
+    -- Convert to degrees and set limits (only X rotation matters for vertical lift)
     self.maxAngle = math.deg(upX)
     self.minAngle = math.deg(downX)
     
-    -- Store original CFrame relationship (neutral position)
-    self.originalCFrame = self.middlePart.CFrame:inverse() * self.nvgPart.CFrame
+    -- Store original joint configuration (neutral position)
+    self.originalC0 = self.twistJoint.C0
 end
 
 function VerticalLift:SetDefaultAngles()
     self.maxAngle = DEFAULT_SETTINGS.maxAngle
     self.minAngle = DEFAULT_SETTINGS.minAngle
-    self.originalCFrame = self.middlePart.CFrame:inverse() * self.nvgPart.CFrame
+    self.originalC0 = self.twistJoint.C0
 end
 
 function VerticalLift:CreateHUD()
@@ -148,7 +158,7 @@ function VerticalLift:CreateHUD()
     -- Create vertical lift instructions
     local verticalLiftInstructions = Instance.new("TextLabel")
     verticalLiftInstructions.Name = "VerticalLiftInstructions"
-    verticalLiftInstructions.Text = "↑↓ Vertical | 1 Reset | 2 Max Up | 3 Max Down"
+    verticalLiftInstructions.Text = "↑↓ Vertical | 2 Max Up | 3 Max Down"
     verticalLiftInstructions.Size = UDim2.new(0.3, 0, 0.025, 0)
     verticalLiftInstructions.Position = UDim2.new(0.02, 0, 0.18, 0)
     verticalLiftInstructions.BackgroundTransparency = 1
@@ -161,9 +171,14 @@ function VerticalLift:CreateHUD()
     print("HUD creation complete")
 end
 
+function VerticalLift:SetEnabled(enabled)
+    self.enabled = enabled and true or false
+end
+
 function VerticalLift:SetupInputHandling()
     local connection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
+        if not self.enabled then return end
         
         print("Input received:", input.KeyCode.Name)
         
@@ -175,10 +190,6 @@ function VerticalLift:SetupInputHandling()
             -- Lower NVG vertically
             print("Down arrow pressed - lowering NVG")
             self:AdjustLift(-1)
-        elseif input.KeyCode == Enum.KeyCode.One then
-            -- Reset vertical lift to neutral
-            print("1 key pressed - resetting to neutral")
-            self:SetAngle(0)
         elseif input.KeyCode == Enum.KeyCode.Two then
             -- Set vertical lift to maximum up
             print("2 key pressed - setting to max up")
@@ -197,7 +208,7 @@ end
 function VerticalLift:AdjustLift(direction)
     print("AdjustLift called with direction:", direction)
     
-    if not self.middlePart or not self.nvgPart or self.isAdjusting then 
+    if not self.enabled or not self.middlePart or not self.nvgPart or self.isAdjusting then 
         print("AdjustLift blocked - middlePart:", self.middlePart ~= nil, "nvgPart:", self.nvgPart ~= nil, "isAdjusting:", self.isAdjusting)
         return 
     end
@@ -213,6 +224,7 @@ function VerticalLift:AdjustLift(direction)
         self.currentAngle = targetAngle
         self:UpdatePosition()
         self:UpdateIndicator()
+        
         print("Angle updated to:", self.currentAngle)
     end
     
@@ -220,17 +232,18 @@ function VerticalLift:AdjustLift(direction)
 end
 
 function VerticalLift:SetAngle(angle)
-    if not self.middlePart or not self.nvgPart or self.isAdjusting then return end
+    if not self.enabled or not self.middlePart or not self.nvgPart or self.isAdjusting then return end
     
     self.isAdjusting = true
     self.currentAngle = math.max(self.minAngle, math.min(self.maxAngle, angle))
     self:UpdatePosition()
     self:UpdateIndicator()
+    
     self.isAdjusting = false
 end
 
 function VerticalLift:UpdatePosition()
-    if not self.middlePart or not self.nvgPart then return end
+    if not self.twistJoint then return end
     
     -- Use CFrameValues if available, otherwise use calculated rotation
     if self.upValue and self.downValue then
@@ -238,17 +251,16 @@ function VerticalLift:UpdatePosition()
         local normalizedAngle = (self.currentAngle - self.minAngle) / (self.maxAngle - self.minAngle)
         normalizedAngle = math.max(0, math.min(1, normalizedAngle)) -- Clamp between 0 and 1
         
-        -- Lerp between downvalue and upvalue
-        local targetCFrame = self.downValue.Value:Lerp(self.upValue.Value, normalizedAngle)
+        -- Lerp between downvalue and upvalue to produce target C0 for the joint
+        local targetC0 = self.downValue.Value:Lerp(self.upValue.Value, normalizedAngle)
         
-        -- Update NVG position relative to Middle
-        self.nvgPart.CFrame = self.middlePart.CFrame * targetCFrame
+        -- Apply to the Motor6D
+        self.twistJoint.C0 = targetC0
     else
         -- Fallback to calculated rotation if CFrameValues not available
-        if self.originalCFrame then
+        if self.originalC0 then
             local rotationCFrame = CFrame.Angles(math.rad(self.currentAngle), 0, 0)
-            local rotatedCFrame = self.originalCFrame * rotationCFrame
-            self.nvgPart.CFrame = self.middlePart.CFrame * rotatedCFrame
+            self.twistJoint.C0 = self.originalC0 * rotationCFrame
         end
     end
 end
@@ -259,10 +271,45 @@ function VerticalLift:UpdateIndicator()
     end
 end
 
-function VerticalLift:ResetToNeutral()
-    self.currentAngle = 0
-    self:UpdatePosition()
+-- Compute target C0 for a given logical angle (degrees)
+function VerticalLift:computeTargetC0(angle)
+    if not self.twistJoint then return nil end
+    local clamped = math.max(self.minAngle, math.min(self.maxAngle, angle))
+    if self.upValue and self.downValue then
+        local normalized = (clamped - self.minAngle) / (self.maxAngle - self.minAngle)
+        normalized = math.max(0, math.min(1, normalized))
+        return self.downValue.Value:Lerp(self.upValue.Value, normalized)
+    elseif self.originalC0 then
+        return self.originalC0 * CFrame.Angles(math.rad(clamped), 0, 0)
+    end
+    return nil
+end
+
+-- Programmatic setter that ignores enabled gating and applies instantly
+function VerticalLift:ForceSetAngle(angle)
+    if not self.twistJoint then return end
+    local targetC0 = self:computeTargetC0(angle)
+    if not targetC0 then return end
+    self.currentAngle = math.max(self.minAngle, math.min(self.maxAngle, angle))
+    self.twistJoint.C0 = targetC0
     self:UpdateIndicator()
+end
+
+-- Tween to a given angle over duration seconds (ignores enabled gating)
+function VerticalLift:ForceTweenToAngle(angle, duration)
+    if not self.twistJoint then return end
+    local targetC0 = self:computeTargetC0(angle)
+    if not targetC0 then return end
+    local info = TweenInfo.new(duration or 0.3, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    local tween = TweenService:Create(self.twistJoint, info, { C0 = targetC0 })
+    local connection
+    connection = tween.Completed:Connect(function()
+        self.currentAngle = math.max(self.minAngle, math.min(self.maxAngle, angle))
+        self:UpdateIndicator()
+        if connection then connection:Disconnect() end
+    end)
+    table.insert(self.connections, connection)
+    tween:Play()
 end
 
 function VerticalLift:GetCurrentAngle()
@@ -291,7 +338,8 @@ function VerticalLift:Destroy()
     self.gui = nil
     self.middlePart = nil
     self.nvgPart = nil
-    self.originalCFrame = nil
+    self.twistJoint = nil
+    self.originalC0 = nil
     self.upValue = nil
     self.downValue = nil
 end
